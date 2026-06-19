@@ -27,8 +27,12 @@ CRED="$HOME/.claude/.credentials.json"
 
 DC="npx -y @devcontainers/cli"
 SOCK="/home/node/.claude-box.sock"      # dtach session socket (inside container)
+# command the dtach session runs (resolved at attach time inside the container)
+RUN='cd /workspaces/repo && exec "$(command -v claude || echo "$HOME/.local/bin/claude")" --dangerously-skip-permissions'
 cid() { docker ps -q --filter "label=devcontainer.local_folder=$CFG" | head -1; }
-attach() { exec docker exec -it -u node "$1" dtach -a "$SOCK"; }
+# -A: attach if the session is live, else create it (self-heals after claude exits)
+# -E -z: no dtach keybinds (Ctrl-\ detach and Ctrl-Z suspend both pass through)
+attach() { exec docker exec -it -u node "$1" dtach -A "$SOCK" -E -z bash -lc "$RUN"; }
 
 # --- already running -> attach -------------------------------------------------
 EXIST="$(cid)"
@@ -54,13 +58,17 @@ CLAUDE_BIN="$(command -v claude || echo "$HOME/.local/bin/claude")"
 mkdir -p "$HOME/.claude"
 cp /tmp/host-claude-creds.json "$HOME/.claude/.credentials.json"
 chmod 600 "$HOME/.claude/.credentials.json"
-node -e 'const fs=require("fs"),os=require("os");const f=os.homedir()+"/.claude.json";let j={};try{j=JSON.parse(fs.readFileSync(f,"utf8"))}catch(e){}; j.hasCompletedOnboarding=true; fs.writeFileSync(f,JSON.stringify(j,null,2))'
+# pre-accept onboarding + the workspace trust dialog (per-project) in ~/.claude.json
+node -e 'const fs=require("fs"),os=require("os");const f=os.homedir()+"/.claude.json";let j={};try{j=JSON.parse(fs.readFileSync(f,"utf8"))}catch(e){}; j.hasCompletedOnboarding=true; j.bypassPermissionsModeAccepted=true; j.projects=j.projects||{}; j.projects["/workspaces/repo"]=Object.assign(j.projects["/workspaces/repo"]||{},{hasTrustDialogAccepted:true}); fs.writeFileSync(f,JSON.stringify(j,null,2))'
+# pre-accept the interactive --dangerously-skip-permissions disclaimer. In current
+# Claude the prompt is gated by settings.skipDangerousModePermissionPrompt — exactly
+# what clicking "Yes, I accept" persists into ~/.claude/settings.json.
+node -e 'const fs=require("fs"),os=require("os");const d=os.homedir()+"/.claude";fs.mkdirSync(d,{recursive:true});const f=d+"/settings.json";let j={};try{j=JSON.parse(fs.readFileSync(f,"utf8"))}catch(e){}; j.skipDangerousModePermissionPrompt=true; fs.writeFileSync(f,JSON.stringify(j,null,2))'
 if [ -n "${GH_TOKEN:-}" ]; then
   echo "$GH_TOKEN" | gh auth login --with-token 2>/dev/null || true
   gh auth setup-git 2>/dev/null || true
 fi
-rm -f "$HOME/.claude-box.sock"
-dtach -n "$HOME/.claude-box.sock" bash -lc "cd /workspaces/repo && exec '$CLAUDE_BIN' --dangerously-skip-permissions"
+rm -f "$HOME/.claude-box.sock"   # stale socket from a prior container, if any
 SETUP
 
 # --- populate volume: fresh clone in Docker (not on host) + drop setup.sh in ---
