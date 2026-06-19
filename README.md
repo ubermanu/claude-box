@@ -3,10 +3,10 @@
 One command to boot an isolated devcontainer and attach an interactive Claude session inside it.
 
 ```sh
-claude-box <task> [repo-source]
+claude-box <task>
 ```
 
-The repo lives in a Docker volume — never on your host filesystem. Only your Claude subscription credentials are copied in. Secrets are injected via devcontainer's native `--secrets-file`, so they never hit `argv`, `ps`, or shell history.
+The current directory's repo is cloned into a Docker volume — never touching your host filesystem. Only your Claude subscription credentials are copied in. Secrets are injected via devcontainer's native `--secrets-file`, so they never hit `argv`, `ps`, or shell history.
 
 ## Why
 
@@ -15,20 +15,19 @@ Running an agent with `--dangerously-skip-permissions` on your real files and cr
 ## Usage
 
 ```sh
-claude-box <task> [repo-source]
+claude-box <task>
 ```
 
 - `task` — run label; names the volume, dtach session, and container.
-- `repo-source` — local path or git URL. Defaults to the current directory.
+
+Run it from the repo you want to sandbox — the current directory is cloned into the box.
 
 It's idempotent: if the box is up it attaches; otherwise it creates the volume, clones the repo, boots the container, sets up Claude, then attaches.
 
 To detach, close the terminal — the session keeps running; re-run the same command to reattach. (Ctrl-\ and Ctrl-Z pass through to Claude rather than detaching.)
 
 ```sh
-claude-box refactor                                   # sandbox cwd
-claude-box fix-bug https://github.com/you/project.git # clone a remote repo
-claude-box review ~/code/some-project                 # sandbox a local path
+claude-box refactor   # sandbox the current repo under the label "refactor"
 ```
 
 ## How it works
@@ -52,7 +51,7 @@ claude-box review ~/code/some-project                 # sandbox a local path
 | --- | --- |
 | `CLAUDE_BOX_HOME` | Base directory for run state. Defaults to `~/.claude-box`. |
 | `~/.claude-box/.env` | Secrets, one `KEY=value` per line. Injected via `--secrets-file`. Keep it `chmod 600` and gitignored. |
-| `GH_TOKEN` (in `.env`) | If set, authenticates `gh` in the box and clones private git URLs. |
+| `GH_TOKEN` (in `.env`) | If set, authenticates `gh` inside the box. |
 | `~/.claude/.credentials.json` | Host Claude credentials, copied into the container. |
 
 ## Installation

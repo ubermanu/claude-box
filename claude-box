@@ -3,10 +3,10 @@ set -euo pipefail
 
 # claude-box — one command: boot isolated devcontainer + attach interactive Claude.
 #
-#   claude-box <task> [repo-source]
-#     task        : run label (volume + dtach session + container)
-#     repo-source : local path or git URL (default: cwd)
+#   claude-box <task>
+#     task : run label (volume + dtach session + container)
 #
+# Always clones the current directory's repo into the box.
 # Idempotent: box up already -> just attach. Box down -> create then attach.
 #
 # Isolation:
@@ -15,8 +15,8 @@ set -euo pipefail
 #   - secrets (GH_TOKEN etc) from ~/.claude-box/.env, injected via --secrets-file
 #     (never on argv / in ps / in shell history)
 
-TASK="${1:?usage: claude-box <task> [repo-source]}"
-REPO_SRC="${2:-$(pwd)}"
+TASK="${1:?usage: claude-box <task>}"
+REPO_SRC="$(pwd)"
 
 BOX_HOME="${CLAUDE_BOX_HOME:-$HOME/.claude-box}"
 CFG="$BOX_HOME/runs/$TASK/cfg"          # tiny: holds only devcontainer.json on host
@@ -75,17 +75,7 @@ SETUP
 echo "==> volume $VOL: cloning $REPO_SRC"
 docker volume create "$VOL" >/dev/null
 docker run --rm -v "$VOL":/ws alpine sh -c 'rm -rf /ws/repo'
-case "$REPO_SRC" in
-  *://*|git@*)
-    TOKENED="$REPO_SRC"
-    if [ -f "$ENVFILE" ] && grep -q '^GH_TOKEN=' "$ENVFILE"; then
-      GT="$(grep '^GH_TOKEN=' "$ENVFILE" | head -1 | cut -d= -f2-)"
-      TOKENED="$(printf '%s' "$REPO_SRC" | sed -E "s#^https?://#https://x-access-token:$GT@#; s#^git@github.com:#https://x-access-token:$GT@github.com/#")"
-    fi
-    docker run --rm -v "$VOL":/ws alpine/git clone --quiet "$TOKENED" /ws/repo ;;
-  *)
-    docker run --rm -v "$REPO_SRC":/src:ro -v "$VOL":/ws alpine/git -c safe.directory='*' clone --quiet /src /ws/repo ;;
-esac
+docker run --rm -v "$REPO_SRC":/src:ro -v "$VOL":/ws alpine/git -c safe.directory='*' clone --quiet /src /ws/repo
 docker run --rm -v "$VOL":/ws -v "$SETUP_LOCAL":/in.sh:ro alpine sh -c 'cp /in.sh /ws/repo/.claude-box-setup.sh && chmod +x /ws/repo/.claude-box-setup.sh && chown -R 1000:1000 /ws'
 
 # --- host cfg: repo's own devcontainer + volume/env overrides ------------------
