@@ -76,7 +76,8 @@ echo "==> volume $VOL: cloning $REPO_SRC"
 docker volume create "$VOL" >/dev/null
 docker run --rm -v "$VOL":/ws alpine sh -c 'rm -rf /ws/repo'
 docker run --rm -v "$REPO_SRC":/src:ro -v "$VOL":/ws alpine/git -c safe.directory='*' clone --quiet /src /ws/repo
-docker run --rm -v "$VOL":/ws -v "$SETUP_LOCAL":/in.sh:ro alpine sh -c 'cp /in.sh /ws/repo/.claude-box-setup.sh && chmod +x /ws/repo/.claude-box-setup.sh && chown -R 1000:1000 /ws'
+# setup script lives on the volume but OUTSIDE the repo, so it never pollutes git status
+docker run --rm -v "$VOL":/ws -v "$SETUP_LOCAL":/in.sh:ro alpine sh -c 'cp /in.sh /ws/.claude-box-setup.sh && chmod +x /ws/.claude-box-setup.sh && chown -R 1000:1000 /ws'
 
 # --- host cfg: repo's own devcontainer + volume/env overrides ------------------
 rm -rf "$CFG"; mkdir -p "$CFG/.devcontainer"
@@ -112,7 +113,7 @@ $DC up --workspace-folder "$CFG" \
   ${SECRETS_ARGS[@]+"${SECRETS_ARGS[@]}"}
 
 echo "==> setup claude + dtach"
-$DC exec --workspace-folder "$CFG" ${SECRETS_ARGS[@]+"${SECRETS_ARGS[@]}"} bash "$WS/.claude-box-setup.sh"
+$DC exec --workspace-folder "$CFG" ${SECRETS_ARGS[@]+"${SECRETS_ARGS[@]}"} bash /workspaces/.claude-box-setup.sh
 
 echo "==> attach"
 attach "$(cid)"
