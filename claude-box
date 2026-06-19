@@ -9,6 +9,10 @@ set -euo pipefail
 # Always clones the current directory's repo into the box.
 # Idempotent: box up already -> just attach. Box down -> create then attach.
 #
+# Multiple boxes run concurrently — volume, host cfg, and container are all keyed
+# by <label>. TODO: a repo devcontainer that publishes a fixed host port (appPort /
+# pinned forwardPorts) would clash across boxes; auto-offset or skip the publish.
+#
 # Isolation:
 #   - repo code lives in a Docker VOLUME (claude-box-<label>), never on host fs
 #   - your Claude subscription creds copied in; nothing else of host auth
