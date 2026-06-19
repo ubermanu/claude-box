@@ -18,15 +18,15 @@ Running an agent with `--dangerously-skip-permissions` on your real filesystem a
 claude-box <task> [repo-source]
 ```
 
-- `task` — a run label. Names the Docker volume, the tmux session, and the container.
+- `task` — a run label. Names the Docker volume, the dtach session, and the container.
 - `repo-source` — a local path or a git URL. Defaults to the current directory.
 
 The command is idempotent:
 
-- **Box already up** → attaches to the running tmux session.
+- **Box already up** → attaches to the running dtach session.
 - **Box down** → creates the volume, clones the repo, boots the devcontainer, sets up Claude, then attaches.
 
-Detach from the session with the usual tmux binding (`Ctrl-b d`). Re-run the same command to reattach.
+Detach from the session with the dtach binding (`Ctrl-\`). Re-run the same command to reattach.
 
 ### Examples
 
@@ -46,8 +46,8 @@ claude-box review ~/code/some-project
 1. **Volume** — a Docker volume `claude-box-<task>` is created and the repo is cloned into it via a throwaway `alpine/git` container, so the host filesystem is never touched. A setup script is dropped into the volume.
 2. **Config** — the repo's own `.devcontainer` (or `.devcontainer.json`) is reused if present; otherwise a default universal image with the GitHub CLI feature is used. The config is patched to mount the volume as the workspace.
 3. **Boot** — `@devcontainers/cli` brings the container up. Your Claude credentials are bind-mounted in at boot; secrets are passed via `--secrets-file`.
-4. **Setup** — inside the container, the setup script installs `tmux` and the `claude` CLI (if missing), copies in your credentials, optionally logs in `gh` with `GH_TOKEN`, and starts Claude under tmux with `--dangerously-skip-permissions`.
-5. **Attach** — `docker exec -it ... tmux attach` drops you into the live Claude session.
+4. **Setup** — inside the container, the setup script installs `dtach` and the `claude` CLI (if missing), copies in your credentials, optionally logs in `gh` with `GH_TOKEN`, and starts Claude under dtach with `--dangerously-skip-permissions`.
+5. **Attach** — `docker exec -it ... dtach -a` drops you into the live Claude session.
 
 ## Requirements
 

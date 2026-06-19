@@ -4,7 +4,7 @@ set -euo pipefail
 # claude-box — one command: boot isolated devcontainer + attach interactive Claude.
 #
 #   claude-box <task> [repo-source]
-#     task        : run label (volume + tmux session + container)
+#     task        : run label (volume + dtach session + container)
 #     repo-source : local path or git URL (default: cwd)
 #
 # Idempotent: box up already -> just attach. Box down -> create then attach.
@@ -26,8 +26,9 @@ ENVFILE="$BOX_HOME/.env"                # your secrets, gitignored, chmod 600
 CRED="$HOME/.claude/.credentials.json"
 
 DC="npx -y @devcontainers/cli"
+SOCK="/home/node/.claude-box.sock"      # dtach session socket (inside container)
 cid() { docker ps -q --filter "label=devcontainer.local_folder=$CFG" | head -1; }
-attach() { exec docker exec -it -u node "$1" tmux attach -t task; }
+attach() { exec docker exec -it -u node "$1" dtach -a "$SOCK"; }
 
 # --- already running -> attach -------------------------------------------------
 EXIST="$(cid)"
@@ -45,7 +46,7 @@ cat > "$SETUP_LOCAL" <<'SETUP'
 #!/usr/bin/env bash
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
-command -v tmux >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq tmux >/dev/null; }
+command -v dtach >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq dtach >/dev/null; }
 if ! command -v claude >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/claude" ]; then
   curl -fsSL https://claude.ai/install.sh | bash
 fi
@@ -58,8 +59,8 @@ if [ -n "${GH_TOKEN:-}" ]; then
   echo "$GH_TOKEN" | gh auth login --with-token 2>/dev/null || true
   gh auth setup-git 2>/dev/null || true
 fi
-tmux kill-session -t task 2>/dev/null || true
-tmux new -d -s task "cd /workspaces/repo && exec '$CLAUDE_BIN' --dangerously-skip-permissions"
+rm -f "$HOME/.claude-box.sock"
+dtach -n "$HOME/.claude-box.sock" bash -lc "cd /workspaces/repo && exec '$CLAUDE_BIN' --dangerously-skip-permissions"
 SETUP
 
 # --- populate volume: fresh clone in Docker (not on host) + drop setup.sh in ---
@@ -112,7 +113,7 @@ $DC up --workspace-folder "$CFG" \
   --mount "type=bind,source=$CRED,target=/tmp/host-claude-creds.json" \
   ${SECRETS_ARGS[@]+"${SECRETS_ARGS[@]}"}
 
-echo "==> setup claude + tmux"
+echo "==> setup claude + dtach"
 $DC exec --workspace-folder "$CFG" ${SECRETS_ARGS[@]+"${SECRETS_ARGS[@]}"} bash "$WS/.claude-box-setup.sh"
 
 echo "==> attach"
