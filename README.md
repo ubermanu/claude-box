@@ -3,7 +3,7 @@
 One command to boot an isolated devcontainer and attach an interactive Claude session inside it.
 
 ```sh
-claude-box <task>
+claude-box <label>
 ```
 
 The current directory's repo is cloned into a Docker volume — never touching your host filesystem. Only your Claude subscription credentials are copied in. Secrets are injected via devcontainer's native `--secrets-file`, so they never hit `argv`, `ps`, or shell history.
@@ -15,10 +15,10 @@ Running an agent with `--dangerously-skip-permissions` on your real files and cr
 ## Usage
 
 ```sh
-claude-box <task>
+claude-box <label>
 ```
 
-- `task` — run label; names the volume, dtach session, and container.
+- `label` — names the volume, dtach session, and container.
 
 Run it from the repo you want to sandbox — the current directory is cloned into the box.
 
@@ -32,7 +32,7 @@ claude-box refactor   # sandbox the current repo under the label "refactor"
 
 ## How it works
 
-1. **Volume** — `claude-box-<task>` is created and the repo cloned into it by a throwaway `alpine/git` container; the host fs is never touched. A setup script is dropped in alongside.
+1. **Volume** — `claude-box-<label>` is created and the repo cloned into it by a throwaway `alpine/git` container; the host fs is never touched. A setup script is dropped in alongside.
 2. **Config** — the repo's own `.devcontainer` is reused if present, else a default universal image. It's patched to mount the volume as the workspace.
 3. **Boot** — `@devcontainers/cli` brings the container up. Claude credentials are bind-mounted in; secrets are passed via `--secrets-file`.
 4. **Setup** — installs `dtach` and the `claude` CLI if missing, copies in your credentials, pre-accepts the onboarding, trust, and bypass-permissions prompts, and optionally logs in `gh` with `GH_TOKEN`.
