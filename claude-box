@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# claude-box — one command: boot isolated devcontainer + attach interactive Claude.
+#
+#   claude-box <task> [repo-source]
+#     task        : run label (volume + tmux session + container)
+#     repo-source : local path or git URL (default: cwd)
+#
+# Idempotent: box up already -> just attach. Box down -> create then attach.
+#
+# Isolation:
+#   - repo code lives in a Docker VOLUME (claude-box-<task>), never on host fs
+#   - your Claude subscription creds copied in; nothing else of host auth
+#   - secrets (GH_TOKEN etc) from ~/.claude-box/.env, injected via --secrets-file
+#     (never on argv / in ps / in shell history)
+
+TASK="${1:?usage: claude-box <task> [repo-source]}"
+REPO_SRC="${2:-$(pwd)}"
+
+BOX_HOME="${CLAUDE_BOX_HOME:-$HOME/.claude-box}"
+CFG="$BOX_HOME/runs/$TASK/cfg"          # tiny: holds only devcontainer.json on host
+VOL="claude-box-$TASK"                  # repo code lives here
+WS="/workspaces/repo"
+ENVFILE="$BOX_HOME/.env"                # your secrets, gitignored, chmod 600
+CRED="$HOME/.claude/.credentials.json"
+
+DC="npx -y @devcontainers/cli"
+cid() { docker ps -q --filter "label=devcontainer.local_folder=$CFG" | head -1; }
+attach() { exec docker exec -it -u node "$1" tmux attach -t task; }
+
+# --- already running -> attach -------------------------------------------------
+EXIST="$(cid)"
+if [ -n "$EXIST" ]; then
+  echo "==> box '$TASK' up, attaching"
+  attach "$EXIST"
+fi
+
+[ -f "$CRED" ] || { echo "!! no Claude creds at $CRED — run 'claude' once on host"; exit 1; }
+
+# --- in-container setup script (generated first, copied into the volume) -------
+SETUP_LOCAL="$BOX_HOME/runs/$TASK/setup.sh"
+mkdir -p "$(dirname "$SETUP_LOCAL")"
+cat > "$SETUP_LOCAL" <<'SETUP'
+#!/usr/bin/env bash
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+command -v tmux >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq tmux >/dev/null; }
+if ! command -v claude >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/claude" ]; then
+  curl -fsSL https://claude.ai/install.sh | bash
+fi
+CLAUDE_BIN="$(command -v claude || echo "$HOME/.local/bin/claude")"
+mkdir -p "$HOME/.claude"
+cp /tmp/host-claude-creds.json "$HOME/.claude/.credentials.json"
+chmod 600 "$HOME/.claude/.credentials.json"
+node -e 'const fs=require("fs"),os=require("os");const f=os.homedir()+"/.claude.json";let j={};try{j=JSON.parse(fs.readFileSync(f,"utf8"))}catch(e){}; j.hasCompletedOnboarding=true; fs.writeFileSync(f,JSON.stringify(j,null,2))'
+if [ -n "${GH_TOKEN:-}" ]; then
+  echo "$GH_TOKEN" | gh auth login --with-token 2>/dev/null || true
+  gh auth setup-git 2>/dev/null || true
+fi
+tmux kill-session -t task 2>/dev/null || true
+tmux new -d -s task "cd /workspaces/repo && exec '$CLAUDE_BIN' --dangerously-skip-permissions"
+SETUP
+
+# --- populate volume: fresh clone in Docker (not on host) + drop setup.sh in ---
+echo "==> volume $VOL: cloning $REPO_SRC"
+docker volume create "$VOL" >/dev/null
+docker run --rm -v "$VOL":/ws alpine sh -c 'rm -rf /ws/repo'
+case "$REPO_SRC" in
+  *://*|git@*)
+    TOKENED="$REPO_SRC"
+    if [ -f "$ENVFILE" ] && grep -q '^GH_TOKEN=' "$ENVFILE"; then
+      GT="$(grep '^GH_TOKEN=' "$ENVFILE" | head -1 | cut -d= -f2-)"
+      TOKENED="$(printf '%s' "$REPO_SRC" | sed -E "s#^https?://#https://x-access-token:$GT@#; s#^git@github.com:#https://x-access-token:$GT@github.com/#")"
+    fi
+    docker run --rm -v "$VOL":/ws alpine/git clone --quiet "$TOKENED" /ws/repo ;;
+  *)
+    docker run --rm -v "$REPO_SRC":/src:ro -v "$VOL":/ws alpine/git -c safe.directory='*' clone --quiet /src /ws/repo ;;
+esac
+docker run --rm -v "$VOL":/ws -v "$SETUP_LOCAL":/in.sh:ro alpine sh -c 'cp /in.sh /ws/repo/.claude-box-setup.sh && chmod +x /ws/repo/.claude-box-setup.sh && chown -R 1000:1000 /ws'
+
+# --- host cfg: repo's own devcontainer + volume/env overrides ------------------
+rm -rf "$CFG"; mkdir -p "$CFG/.devcontainer"
+if [ -d "$REPO_SRC/.devcontainer" ]; then
+  cp -r "$REPO_SRC/.devcontainer/." "$CFG/.devcontainer/"
+elif [ -f "$REPO_SRC/.devcontainer.json" ]; then
+  cp "$REPO_SRC/.devcontainer.json" "$CFG/.devcontainer/devcontainer.json"
+else
+  echo '{"image":"mcr.microsoft.com/devcontainers/universal:2","features":{"ghcr.io/devcontainers/features/github-cli:1":{}}}' \
+    > "$CFG/.devcontainer/devcontainer.json"
+fi
+touch "$CFG/.devcontainer/devcontainer.env"   # native repo env-file (optional, gitignore it)
+jq --arg vol "$VOL" --arg ws "$WS" '
+  .workspaceMount = "source=\($vol),target=/workspaces,type=volume"
+  | .workspaceFolder = $ws
+  | .runArgs = ((.runArgs // []) + ["--env-file",".devcontainer/devcontainer.env"])
+' "$CFG/.devcontainer/devcontainer.json" > "$CFG/.devcontainer/dc.tmp"
+mv "$CFG/.devcontainer/dc.tmp" "$CFG/.devcontainer/devcontainer.json"
+
+# --- secrets from ~/.claude-box/.env -> native --secrets-file ------------------
+SECRETS_ARGS=()
+if [ -f "$ENVFILE" ]; then
+  SJ="$CFG/.secrets.json"
+  jq -Rn '[inputs | select(test("^[A-Za-z_][A-Za-z0-9_]*=")) | split("=") | {(.[0]): (.[1:]|join("="))}] | add // {}' "$ENVFILE" > "$SJ"
+  chmod 600 "$SJ"
+  SECRETS_ARGS=(--secrets-file "$SJ")
+fi
+
+# --- boot + setup + attach -----------------------------------------------------
+echo "==> devcontainer up"
+$DC up --workspace-folder "$CFG" \
+  --mount "type=bind,source=$CRED,target=/tmp/host-claude-creds.json" \
+  ${SECRETS_ARGS[@]+"${SECRETS_ARGS[@]}"}
+
+echo "==> setup claude + tmux"
+$DC exec --workspace-folder "$CFG" ${SECRETS_ARGS[@]+"${SECRETS_ARGS[@]}"} bash "$WS/.claude-box-setup.sh"
+
+echo "==> attach"
+attach "$(cid)"
