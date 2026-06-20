@@ -104,6 +104,8 @@ ENV_ARGS=(); GIT_OPTS=()
 [ -n "$GT" ] && { ENV_ARGS=(-e GH_TOKEN); GIT_OPTS=(-c 'credential.helper=!f(){ echo username=x-access-token; echo "password=$GH_TOKEN"; }; f'); }
 GH_TOKEN="$GT" docker run --rm ${ENV_ARGS[@]+"${ENV_ARGS[@]}"} -v "$VOL":/ws alpine/git \
   ${GIT_OPTS[@]+"${GIT_OPTS[@]}"} clone --quiet "$CLONE_URL" /ws/repo
+# work on a dedicated branch off the default branch, not the default branch itself
+docker run --rm -v "$VOL":/ws alpine/git -C /ws/repo checkout -q -b "claude-box-$ID"
 docker run --rm -v "$VOL":/ws alpine chown -R 1000:1000 /ws
 
 # --- run the box --------------------------------------------------------------
