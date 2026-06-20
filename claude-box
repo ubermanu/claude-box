@@ -21,6 +21,28 @@ set -euo pipefail
 #   - your Claude subscription creds copied in; nothing else of host auth
 #   - GH_TOKEN (clone + push) read from ~/.claude-box/.env, injected via --env-file
 
+# --- colors (only when stdout is a TTY) ----------------------------------------
+if [ -t 1 ]; then
+  BOLD=$'\033[1m'; DIM=$'\033[2m'; RESET=$'\033[0m'
+  CYAN=$'\033[36m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; RED=$'\033[31m'; MAGENTA=$'\033[35m'
+else
+  BOLD=''; DIM=''; RESET=''; CYAN=''; GREEN=''; YELLOW=''; RED=''; MAGENTA=''
+fi
+
+step() { printf '%s  →%s  %s\n'        "$CYAN$BOLD"    "$RESET" "$*"; }
+ok()   { printf '%s  ✓%s  %s\n'        "$GREEN$BOLD"   "$RESET" "$*"; }
+dim()  { printf '     %s%s%s\n'         "$DIM"          "$*"    "$RESET"; }
+warn() { printf '%s  ⚠%s  %s\n'        "$YELLOW$BOLD"  "$RESET" "$*" >&2; }
+die()  { printf '%s  ✗%s  %s\n'        "$RED$BOLD"     "$RESET" "$*" >&2; exit 1; }
+
+box_header() {
+  local id="$1" hint="$2"
+  printf '\n%s  ┌─ claude-box ─────────────────────────┐%s\n' "$MAGENTA$BOLD" "$RESET"
+  printf '%s  │%s  box id   %s%-28s%s%s  │%s\n' "$MAGENTA$BOLD" "$RESET" "$BOLD" "$id" "$RESET" "$MAGENTA$BOLD" "$RESET"
+  printf '%s  │%s  reattach %s%-28s%s%s  │%s\n' "$MAGENTA$BOLD" "$RESET" "$DIM"  "$hint" "$RESET" "$MAGENTA$BOLD" "$RESET"
+  printf '%s  └───────────────────────────────────────┘%s\n\n' "$MAGENTA$BOLD" "$RESET"
+}
+
 # random 5-char id (lowercase alnum); subshell disables pipefail so head's
 # early close doesn't trip the `tr` SIGPIPE under `set -o pipefail`.
 genid() { ( set +o pipefail; LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c5 ); }
@@ -74,14 +96,14 @@ attach() {
 # --- already running -> attach -------------------------------------------------
 EXIST="$(cid)"
 if [ -n "$EXIST" ]; then
-  echo "==> box '$ID' up, attaching"
+  step "box ${BOLD}$ID${RESET} is running, attaching"
   attach "$EXIST"
 fi
 
 # --- create path --------------------------------------------------------------
-[ -n "$REPO" ] || { echo "!! box '$ID' does not exist — pass <owner/repo> to create a box"; exit 1; }
-[ -f "$CRED" ] || { echo "!! no Claude creds at $CRED — run 'claude' once on host"; exit 1; }
-echo "==> new box id: $ID  (reattach later with: claude-box $ID)"
+[ -n "$REPO" ] || die "box '$ID' does not exist — pass <owner/repo> to create one"
+[ -f "$CRED" ] || die "no Claude credentials at $CRED — run 'claude' once on host first"
+box_header "$ID" "claude-box $ID"
 
 # --- seed ~/.claude-box defaults on first run ---------------------------------
 mkdir -p "$BOX_HOME" "$HOMEADD"
@@ -108,17 +130,18 @@ RUN echo 'node ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/node && chmod 0440 /etc/
 USER node
 WORKDIR /workspaces
 DOCKERFILE
-  echo "==> seeded default $DOCKERFILE"
+  ok "seeded $DOCKERFILE"
 fi
 
 # --- build the box image (layer cache makes this ~free when unchanged) --------
-echo "==> build image $IMG"
+step "building image ${BOLD}$IMG${RESET}"
 docker build -t "$IMG" "$BOX_HOME"
 
 # --- populate volume: clone the repo's default branch (never on host fs) -------
 GT="$(grep '^GH_TOKEN=' "$ENVFILE" 2>/dev/null | head -1 | cut -d= -f2- || true)"
 CLONE_URL="https://github.com/$REPO.git"
-echo "==> volume $VOL: cloning $CLONE_URL"
+step "cloning ${BOLD}$CLONE_URL${RESET}"
+dim "volume: $VOL"
 docker volume create "$VOL" >/dev/null
 docker run --rm -v "$VOL":/ws alpine sh -c 'rm -rf /ws/repo'
 # GH_TOKEN is handed to git via a credential helper through the env, so it never
@@ -135,7 +158,7 @@ docker run --rm -v "$VOL":/ws alpine chown -R 1000:1000 /ws
 # claude sessions persist on the host at $SESS, bind-mounted onto just this box's
 # ~/.claude/projects — so other boxes' sessions never appear in this container.
 mkdir -p "$SESS"
-echo "==> run box"
+step "starting container"
 BOX="$(docker run -d --label "claude-box=$ID" \
   --mount "source=$VOL,target=/workspaces,type=volume" \
   --mount "type=bind,source=$SESS,target=/home/node/.claude/projects" \
@@ -178,14 +201,14 @@ rm -f "$HOME/.claude-box.sock"   # stale socket from a prior container, if any
 SETUP
 docker cp "$SETUP" "$BOX":/tmp/claude-box-setup.sh
 rm -f "$SETUP"
-echo "==> setup claude + dtach"
+step "installing claude & dtach"
 docker exec -u node "$BOX" bash /tmp/claude-box-setup.sh
 
 # --- seed the initial prompt (read by $RUN on first boot) ---------------------
 if [ -n "$PROMPT" ]; then
-  echo "==> seed initial prompt"
+  step "seeding initial prompt"
   printf '%s' "$PROMPT" | docker exec -i -u node "$BOX" sh -c 'cat > "$HOME/.claude-box-prompt"'
 fi
 
-echo "==> attach"
+step "attaching to box ${BOLD}$ID${RESET}"
 attach "$BOX"
