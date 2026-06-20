@@ -14,6 +14,8 @@ set -euo pipefail
 #
 # Isolation:
 #   - repo code lives in a Docker VOLUME (claude-box-<id>), never on host fs
+#   - claude sessions persist on the host at ~/.claude-box/sessions/claude-box-<id>, bound to
+#     this box only (other boxes' sessions never leak in); reattach resumes them
 #   - your Claude subscription creds copied in; nothing else of host auth
 #   - GH_TOKEN (clone + push) read from ~/.claude-box/.env, injected via --env-file
 
@@ -33,10 +35,13 @@ ENVFILE="$BOX_HOME/.env"                 # global env, KEY=value per line, chmod
 HOMEADD="$BOX_HOME/homeadditions"        # dotfiles/config copied into the box home
 IMG="claude-box"                         # built from ~/.claude-box/Dockerfile
 VOL="claude-box-$ID"                     # repo code lives here
+SESS="$BOX_HOME/sessions/claude-box-$ID" # host dir holding THIS box's claude sessions
 CRED="$HOME/.claude/.credentials.json"
 SOCK="/home/node/.claude-box.sock"       # dtach session socket (inside container)
-# command the dtach session runs (resolved at attach time inside the container)
-RUN='cd /workspaces/repo && exec "$(command -v claude || echo "$HOME/.local/bin/claude")" --dangerously-skip-permissions'
+# command the dtach session runs (resolved at attach time inside the container).
+# If this box already has a recorded session, resume it (claude --continue);
+# otherwise start fresh. The session dir is bind-mounted from the host (see below).
+RUN='cd /workspaces/repo && CLAUDE="$(command -v claude || echo "$HOME/.local/bin/claude")"; CONT=""; ls "$HOME"/.claude/projects/*/*.jsonl >/dev/null 2>&1 && CONT=--continue; exec "$CLAUDE" --dangerously-skip-permissions $CONT'
 
 cid() { docker ps -q --filter "label=claude-box=$ID" | head -1; }
 # -A: attach if the session is live, else create it (self-heals after claude exits)
@@ -102,11 +107,19 @@ GH_TOKEN="$GT" docker run --rm ${ENV_ARGS[@]+"${ENV_ARGS[@]}"} -v "$VOL":/ws alp
 docker run --rm -v "$VOL":/ws alpine chown -R 1000:1000 /ws
 
 # --- run the box --------------------------------------------------------------
+# claude sessions persist on the host at $SESS, bind-mounted onto just this box's
+# ~/.claude/projects — so other boxes' sessions never appear in this container.
+mkdir -p "$SESS"
 echo "==> run box"
 BOX="$(docker run -d --label "claude-box=$ID" \
   --mount "source=$VOL,target=/workspaces,type=volume" \
+  --mount "type=bind,source=$SESS,target=/home/node/.claude/projects" \
   --env-file "$ENVFILE" \
   "$IMG" sleep infinity)"
+
+# the projects bind-mount makes Docker pre-create ~/.claude owned by root; hand
+# the dir back to node so claude can write settings.json + creds into it.
+docker exec -u root "$BOX" chown node:node /home/node/.claude
 
 # --- homeadditions -> box home, then Claude creds -----------------------------
 if [ -n "$(ls -A "$HOMEADD" 2>/dev/null)" ]; then
