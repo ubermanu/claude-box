@@ -103,7 +103,7 @@ docker run --rm -v "$VOL":/ws alpine chown -R 1000:1000 /ws
 
 # --- run the box --------------------------------------------------------------
 echo "==> run box"
-BOX="$(docker run -d --label "claude-box=$LABEL" \
+BOX="$(docker run -d --label "claude-box=$ID" \
   --mount "source=$VOL,target=/workspaces,type=volume" \
   --env-file "$ENVFILE" \
   "$IMG" sleep infinity)"
