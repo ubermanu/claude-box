@@ -9,12 +9,15 @@ claude-box <owner/repo>
 ## Usage
 
 ```sh
-claude-box <owner/repo>   # create a box from a GitHub repo, then attach
-claude-box <id>           # reattach to a running box
+claude-box <owner/repo>            # create a box from a GitHub repo, then attach
+claude-box <owner/repo> -p "..."   # create a box, boot Claude with an initial prompt
+cat PROMPT.md | claude-box <owner/repo>   # same, prompt piped on stdin
+claude-box <id>                    # reattach to a running box
 ```
 
 - `owner/repo` — a GitHub repo (anything with a `/`). Creates a fresh box and prints its id.
 - `id` — the random 5-char id of an existing box (anything without a `/`). Reattaches to it.
+- `-p, --prompt` — an initial prompt fed to Claude on first boot. If omitted and stdin is piped, the piped text is used instead. The prompt only fires on first start; reattaching resumes the existing session.
 
 Each box gets a random id (e.g. `u87ec`) that keys its volume and container; many run at once. On create the id is printed so you can reattach later. It builds the image, clones the repo, runs the container, sets up Claude, then attaches.
 

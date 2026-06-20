@@ -3,8 +3,10 @@ set -euo pipefail
 
 # claude-box — one command: boot an isolated Docker box + attach interactive Claude.
 #
-#   claude-box <owner/repo>   # create a box from a GitHub repo, then attach
-#   claude-box <id>           # reattach to a running box
+#   claude-box <owner/repo>            # create a box from a GitHub repo, then attach
+#   claude-box <owner/repo> -p "..."   # create a box, boot Claude with an initial prompt
+#   cat PROMPT.md | claude-box <owner/repo>   # same, prompt piped on stdin
+#   claude-box <id>                    # reattach to a running box
 #
 # Pure Docker. The box environment is ~/.claude-box/Dockerfile (yours to edit).
 # The repo's default branch is cloned into a Docker VOLUME — never on the host fs.
@@ -23,7 +25,20 @@ set -euo pipefail
 # early close doesn't trip the `tr` SIGPIPE under `set -o pipefail`.
 genid() { ( set +o pipefail; LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c5 ); }
 
-ARG="${1:?usage: claude-box <owner/repo> (create) | claude-box <id> (reattach)}"
+# parse args: a single positional (owner/repo | id), plus an optional -p/--prompt.
+PROMPT=""; POS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -p|--prompt) PROMPT="${2:?-p needs a prompt}"; shift 2 ;;
+    -p*)         PROMPT="${1#-p}"; shift ;;
+    --prompt=*)  PROMPT="${1#--prompt=}"; shift ;;
+    *)           POS+=("$1"); shift ;;
+  esac
+done
+# no -p but stdin is piped (not a tty) -> read the prompt from stdin
+[ -z "$PROMPT" ] && [ ! -t 0 ] && PROMPT="$(cat)"
+
+ARG="${POS[0]:?usage: claude-box <owner/repo> [-p PROMPT] (create) | claude-box <id> (reattach)}"
 case "$ARG" in
   */*) REPO="$ARG"; ID="$(genid)" ;;   # owner/repo -> create a new box
   *)   REPO="";     ID="$ARG"     ;;   # bare id    -> reattach
@@ -40,13 +55,21 @@ CRED="$HOME/.claude/.credentials.json"
 SOCK="/home/node/.claude-box.sock"       # dtach session socket (inside container)
 # command the dtach session runs (resolved at attach time inside the container).
 # If this box already has a recorded session, resume it (claude --continue);
+# else if an initial prompt was seeded (-p / stdin), boot Claude with it;
 # otherwise start fresh. The session dir is bind-mounted from the host (see below).
-RUN='cd /workspaces/repo && CLAUDE="$(command -v claude || echo "$HOME/.local/bin/claude")"; CONT=""; ls "$HOME"/.claude/projects/*/*.jsonl >/dev/null 2>&1 && CONT=--continue; exec "$CLAUDE" --dangerously-skip-permissions $CONT'
+RUN='cd /workspaces/repo && CLAUDE="$(command -v claude || echo "$HOME/.local/bin/claude")"; PF="$HOME/.claude-box-prompt"; if ls "$HOME"/.claude/projects/*/*.jsonl >/dev/null 2>&1; then exec "$CLAUDE" --dangerously-skip-permissions --continue; elif [ -s "$PF" ]; then exec "$CLAUDE" --dangerously-skip-permissions "$(cat "$PF")"; else exec "$CLAUDE" --dangerously-skip-permissions; fi'
 
 cid() { docker ps -q --filter "label=claude-box=$ID" | head -1; }
 # -A: attach if the session is live, else create it (self-heals after claude exits)
 # -E -z: no dtach keybinds (Ctrl-\ detach and Ctrl-Z suspend both pass through)
-attach() { exec docker exec -it -u node "$1" dtach -A "$SOCK" -E -z bash -lc "$RUN"; }
+# If the prompt was piped in, our stdin is the pipe, not a terminal; reconnect
+# /dev/tty so the attached Claude session stays interactive.
+attach() {
+  if [ ! -t 0 ] && [ -e /dev/tty ]; then
+    exec docker exec -it -u node "$1" dtach -A "$SOCK" -E -z bash -lc "$RUN" < /dev/tty
+  fi
+  exec docker exec -it -u node "$1" dtach -A "$SOCK" -E -z bash -lc "$RUN"
+}
 
 # --- already running -> attach -------------------------------------------------
 EXIST="$(cid)"
@@ -157,6 +180,12 @@ docker cp "$SETUP" "$BOX":/tmp/claude-box-setup.sh
 rm -f "$SETUP"
 echo "==> setup claude + dtach"
 docker exec -u node "$BOX" bash /tmp/claude-box-setup.sh
+
+# --- seed the initial prompt (read by $RUN on first boot) ---------------------
+if [ -n "$PROMPT" ]; then
+  echo "==> seed initial prompt"
+  printf '%s' "$PROMPT" | docker exec -i -u node "$BOX" sh -c 'cat > "$HOME/.claude-box-prompt"'
+fi
 
 echo "==> attach"
 attach "$BOX"
