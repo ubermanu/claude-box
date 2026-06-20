@@ -36,10 +36,3 @@ Everything lives under `~/.claude-box/` (override the base with `CLAUDE_BOX_HOME
 | `.env` | Global env vars, one `KEY=value` per line, injected via `--env-file`. Keep it `chmod 600`. |
 | `homeadditions/` | Dotfiles/config copied into the box's home (`/home/node`). Not for secrets. |
 | `~/.claude/.credentials.json` | Host Claude credentials, copied into the container. |
-
-## Installation
-
-```sh
-cp claude-box ~/.local/bin/
-chmod +x ~/.local/bin/claude-box
-```
