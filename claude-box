@@ -162,18 +162,17 @@ step "building image ${BOLD}$IMG${RESET}"
 docker build -t "$IMG" "$BOX_HOME"
 
 # --- populate volume: clone the repo's default branch (never on host fs) -------
-GT="$(grep '^GH_TOKEN=' "$ENVFILE" 2>/dev/null | head -1 | cut -d= -f2- || true)"
 CLONE_URL="https://github.com/$REPO.git"
 step "cloning ${BOLD}$CLONE_URL${RESET}"
 dim "volume: $VOL"
 docker volume create "$VOL" >/dev/null
 docker run --rm -v "$VOL":/ws alpine sh -c 'rm -rf /ws/repo'
-# GH_TOKEN is handed to git via a credential helper through the env, so it never
-# lands on argv, in ps, or in the repo's .git/config.
-ENV_ARGS=(); GIT_OPTS=()
-[ -n "$GT" ] && { ENV_ARGS=(-e GH_TOKEN); GIT_OPTS=(-c 'credential.helper=!f(){ echo username=x-access-token; echo "password=$GH_TOKEN"; }; f'); }
-GH_TOKEN="$GT" docker run --rm ${ENV_ARGS[@]+"${ENV_ARGS[@]}"} -v "$VOL":/ws alpine/git \
-  ${GIT_OPTS[@]+"${GIT_OPTS[@]}"} clone --quiet "$CLONE_URL" /ws/repo
+# gh reads GH_TOKEN straight from the env and handles auth itself, so the token
+# never lands on argv, in ps, or in the repo's .git/config. Runs as root (uid 0)
+# to write into the freshly created, root-owned volume; ownership is handed to
+# user 1000 below.
+docker run --rm -u 0 -e HOME=/tmp --env-file "$ENVFILE" -v "$VOL":/ws "$IMG" \
+  gh repo clone "$REPO" /ws/repo
 # work on a dedicated branch off the default branch, not the default branch itself
 docker run --rm -v "$VOL":/ws alpine/git -C /ws/repo checkout -q -b "claude-box-$ID"
 docker run --rm -v "$VOL":/ws alpine chown -R 1000:1000 /ws
