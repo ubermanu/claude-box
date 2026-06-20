@@ -1,39 +1,37 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# claude-box — one command: boot isolated devcontainer + attach interactive Claude.
+# claude-box — one command: boot an isolated Docker box + attach interactive Claude.
 #
-#   claude-box <label>
-#     label : run label (volume + dtach session + container)
+#   claude-box <label> <owner/repo>   # create a box from a GitHub repo, then attach
+#   claude-box <label>                # reattach to a running box
 #
-# Always clones the current directory's repo into the box.
-# Idempotent: box up already -> just attach. Box down -> create then attach.
+# Pure Docker. The box environment is ~/.claude-box/Dockerfile (yours to edit).
+# The repo's default branch is cloned into a Docker VOLUME — never on the host fs.
+# Idempotent: box up -> attach. Box down -> create then attach.
 #
-# Multiple boxes run concurrently — volume, host cfg, and container are all keyed
-# by <label>. TODO: a repo devcontainer that publishes a fixed host port (appPort /
-# pinned forwardPorts) would clash across boxes; auto-offset or skip the publish.
+# Multiple boxes run concurrently — volume + container are keyed by <label>.
 #
 # Isolation:
 #   - repo code lives in a Docker VOLUME (claude-box-<label>), never on host fs
 #   - your Claude subscription creds copied in; nothing else of host auth
-#   - secrets (GH_TOKEN etc) from ~/.claude-box/.env, injected via --secrets-file
-#     (never on argv / in ps / in shell history)
+#   - GH_TOKEN (clone + push) read from ~/.claude-box/.env, injected via --env-file
 
-LABEL="${1:?usage: claude-box <label>}"
-REPO_SRC="$(pwd)"
+LABEL="${1:?usage: claude-box <label> [owner/repo]}"
+REPO="${2:-}"
 
 BOX_HOME="${CLAUDE_BOX_HOME:-$HOME/.claude-box}"
-CFG="$BOX_HOME/runs/$LABEL/cfg"          # tiny: holds only devcontainer.json on host
+DOCKERFILE="$BOX_HOME/Dockerfile"
+ENVFILE="$BOX_HOME/.env"                 # global env, KEY=value per line, chmod 600
+HOMEADD="$BOX_HOME/homeadditions"        # dotfiles/config copied into the box home
+IMG="claude-box"                         # built from ~/.claude-box/Dockerfile
 VOL="claude-box-$LABEL"                  # repo code lives here
-WS="/workspaces/repo"
-ENVFILE="$BOX_HOME/.env"                # your secrets, gitignored, chmod 600
 CRED="$HOME/.claude/.credentials.json"
-
-DC="npx -y @devcontainers/cli"
-SOCK="/home/node/.claude-box.sock"      # dtach session socket (inside container)
+SOCK="/home/node/.claude-box.sock"       # dtach session socket (inside container)
 # command the dtach session runs (resolved at attach time inside the container)
 RUN='cd /workspaces/repo && exec "$(command -v claude || echo "$HOME/.local/bin/claude")" --dangerously-skip-permissions'
-cid() { docker ps -q --filter "label=devcontainer.local_folder=$CFG" | head -1; }
+
+cid() { docker ps -q --filter "label=claude-box=$LABEL" | head -1; }
 # -A: attach if the session is live, else create it (self-heals after claude exits)
 # -E -z: no dtach keybinds (Ctrl-\ detach and Ctrl-Z suspend both pass through)
 attach() { exec docker exec -it -u node "$1" dtach -A "$SOCK" -E -z bash -lc "$RUN"; }
@@ -45,12 +43,77 @@ if [ -n "$EXIST" ]; then
   attach "$EXIST"
 fi
 
+# --- create path --------------------------------------------------------------
+[ -n "$REPO" ] || { echo "!! box '$LABEL' does not exist — pass <owner/repo> to create it"; exit 1; }
+case "$REPO" in */*) : ;; *) echo "!! repo must be GitHub owner/repo (got '$REPO')"; exit 1 ;; esac
 [ -f "$CRED" ] || { echo "!! no Claude creds at $CRED — run 'claude' once on host"; exit 1; }
 
-# --- in-container setup script (generated first, copied into the volume) -------
-SETUP_LOCAL="$BOX_HOME/runs/$LABEL/setup.sh"
-mkdir -p "$(dirname "$SETUP_LOCAL")"
-cat > "$SETUP_LOCAL" <<'SETUP'
+# --- seed ~/.claude-box defaults on first run ---------------------------------
+mkdir -p "$BOX_HOME" "$HOMEADD"
+[ -f "$ENVFILE" ] || { touch "$ENVFILE"; chmod 600 "$ENVFILE"; }
+[ -f "$BOX_HOME/.dockerignore" ] || printf '*\n!Dockerfile\n' > "$BOX_HOME/.dockerignore"
+if [ ! -f "$DOCKERFILE" ]; then
+  cat > "$DOCKERFILE" <<'DOCKERFILE'
+# claude-box environment — edit freely.
+# Must keep a uid-1000 'node' user with passwordless sudo, plus git + gh.
+FROM node:22-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      sudo git curl ca-certificates gnupg dtach \
+ && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+ && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list \
+ && apt-get update && apt-get install -y --no-install-recommends gh \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN echo 'node ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/node && chmod 0440 /etc/sudoers.d/node
+
+USER node
+WORKDIR /workspaces
+DOCKERFILE
+  echo "==> seeded default $DOCKERFILE"
+fi
+
+# --- build the box image (layer cache makes this ~free when unchanged) --------
+echo "==> build image $IMG"
+docker build -t "$IMG" "$BOX_HOME"
+
+# --- populate volume: clone the repo's default branch (never on host fs) -------
+GT="$(grep '^GH_TOKEN=' "$ENVFILE" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+CLONE_URL="https://github.com/$REPO.git"
+echo "==> volume $VOL: cloning $CLONE_URL"
+docker volume create "$VOL" >/dev/null
+docker run --rm -v "$VOL":/ws alpine sh -c 'rm -rf /ws/repo'
+# GH_TOKEN is handed to git via a credential helper through the env, so it never
+# lands on argv, in ps, or in the repo's .git/config.
+ENV_ARGS=(); GIT_OPTS=()
+[ -n "$GT" ] && { ENV_ARGS=(-e GH_TOKEN); GIT_OPTS=(-c 'credential.helper=!f(){ echo username=x-access-token; echo "password=$GH_TOKEN"; }; f'); }
+GH_TOKEN="$GT" docker run --rm ${ENV_ARGS[@]+"${ENV_ARGS[@]}"} -v "$VOL":/ws alpine/git \
+  ${GIT_OPTS[@]+"${GIT_OPTS[@]}"} clone --quiet "$CLONE_URL" /ws/repo
+docker run --rm -v "$VOL":/ws alpine chown -R 1000:1000 /ws
+
+# --- run the box --------------------------------------------------------------
+echo "==> run box"
+BOX="$(docker run -d --label "claude-box=$LABEL" \
+  --mount "source=$VOL,target=/workspaces,type=volume" \
+  --env-file "$ENVFILE" \
+  "$IMG" sleep infinity)"
+
+# --- homeadditions -> box home, then Claude creds -----------------------------
+if [ -n "$(ls -A "$HOMEADD" 2>/dev/null)" ]; then
+  docker cp "$HOMEADD/." "$BOX":/home/node/
+  docker exec -u root "$BOX" chown -R node:node /home/node
+fi
+docker exec -u node "$BOX" mkdir -p /home/node/.claude
+docker cp "$CRED" "$BOX":/home/node/.claude/.credentials.json
+docker exec -u root "$BOX" chown node:node /home/node/.claude/.credentials.json
+docker exec -u root "$BOX" chmod 600 /home/node/.claude/.credentials.json
+
+# --- in-container setup -------------------------------------------------------
+SETUP="$(mktemp)"
+cat > "$SETUP" <<'SETUP'
 #!/usr/bin/env bash
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -58,15 +121,9 @@ command -v dtach >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get in
 if ! command -v claude >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/claude" ]; then
   curl -fsSL https://claude.ai/install.sh | bash
 fi
-CLAUDE_BIN="$(command -v claude || echo "$HOME/.local/bin/claude")"
-mkdir -p "$HOME/.claude"
-cp /tmp/host-claude-creds.json "$HOME/.claude/.credentials.json"
-chmod 600 "$HOME/.claude/.credentials.json"
 # pre-accept onboarding + the workspace trust dialog (per-project) in ~/.claude.json
 node -e 'const fs=require("fs"),os=require("os");const f=os.homedir()+"/.claude.json";let j={};try{j=JSON.parse(fs.readFileSync(f,"utf8"))}catch(e){}; j.hasCompletedOnboarding=true; j.bypassPermissionsModeAccepted=true; j.projects=j.projects||{}; j.projects["/workspaces/repo"]=Object.assign(j.projects["/workspaces/repo"]||{},{hasTrustDialogAccepted:true}); fs.writeFileSync(f,JSON.stringify(j,null,2))'
-# pre-accept the interactive --dangerously-skip-permissions disclaimer. In current
-# Claude the prompt is gated by settings.skipDangerousModePermissionPrompt — exactly
-# what clicking "Yes, I accept" persists into ~/.claude/settings.json.
+# pre-accept the interactive --dangerously-skip-permissions disclaimer in ~/.claude/settings.json
 node -e 'const fs=require("fs"),os=require("os");const d=os.homedir()+"/.claude";fs.mkdirSync(d,{recursive:true});const f=d+"/settings.json";let j={};try{j=JSON.parse(fs.readFileSync(f,"utf8"))}catch(e){}; j.skipDangerousModePermissionPrompt=true; fs.writeFileSync(f,JSON.stringify(j,null,2))'
 if [ -n "${GH_TOKEN:-}" ]; then
   echo "$GH_TOKEN" | gh auth login --with-token 2>/dev/null || true
@@ -74,50 +131,10 @@ if [ -n "${GH_TOKEN:-}" ]; then
 fi
 rm -f "$HOME/.claude-box.sock"   # stale socket from a prior container, if any
 SETUP
-
-# --- populate volume: fresh clone in Docker (not on host) + drop setup.sh in ---
-echo "==> volume $VOL: cloning $REPO_SRC"
-docker volume create "$VOL" >/dev/null
-docker run --rm -v "$VOL":/ws alpine sh -c 'rm -rf /ws/repo'
-docker run --rm -v "$REPO_SRC":/src:ro -v "$VOL":/ws alpine/git -c safe.directory='*' clone --quiet /src /ws/repo
-# setup script lives on the volume but OUTSIDE the repo, so it never pollutes git status
-docker run --rm -v "$VOL":/ws -v "$SETUP_LOCAL":/in.sh:ro alpine sh -c 'cp /in.sh /ws/.claude-box-setup.sh && chmod +x /ws/.claude-box-setup.sh && chown -R 1000:1000 /ws'
-
-# --- host cfg: repo's own devcontainer + volume/env overrides ------------------
-rm -rf "$CFG"; mkdir -p "$CFG/.devcontainer"
-if [ -d "$REPO_SRC/.devcontainer" ]; then
-  cp -r "$REPO_SRC/.devcontainer/." "$CFG/.devcontainer/"
-elif [ -f "$REPO_SRC/.devcontainer.json" ]; then
-  cp "$REPO_SRC/.devcontainer.json" "$CFG/.devcontainer/devcontainer.json"
-else
-  echo '{"image":"mcr.microsoft.com/devcontainers/universal:2","features":{"ghcr.io/devcontainers/features/github-cli:1":{}}}' \
-    > "$CFG/.devcontainer/devcontainer.json"
-fi
-touch "$CFG/.devcontainer/devcontainer.env"   # native repo env-file (optional, gitignore it)
-jq --arg vol "$VOL" --arg ws "$WS" '
-  .workspaceMount = "source=\($vol),target=/workspaces,type=volume"
-  | .workspaceFolder = $ws
-  | .runArgs = ((.runArgs // []) + ["--env-file",".devcontainer/devcontainer.env"])
-' "$CFG/.devcontainer/devcontainer.json" > "$CFG/.devcontainer/dc.tmp"
-mv "$CFG/.devcontainer/dc.tmp" "$CFG/.devcontainer/devcontainer.json"
-
-# --- secrets from ~/.claude-box/.env -> native --secrets-file ------------------
-SECRETS_ARGS=()
-if [ -f "$ENVFILE" ]; then
-  SJ="$CFG/.secrets.json"
-  jq -Rn '[inputs | select(test("^[A-Za-z_][A-Za-z0-9_]*=")) | split("=") | {(.[0]): (.[1:]|join("="))}] | add // {}' "$ENVFILE" > "$SJ"
-  chmod 600 "$SJ"
-  SECRETS_ARGS=(--secrets-file "$SJ")
-fi
-
-# --- boot + setup + attach -----------------------------------------------------
-echo "==> devcontainer up"
-$DC up --workspace-folder "$CFG" \
-  --mount "type=bind,source=$CRED,target=/tmp/host-claude-creds.json" \
-  ${SECRETS_ARGS[@]+"${SECRETS_ARGS[@]}"}
-
+docker cp "$SETUP" "$BOX":/tmp/claude-box-setup.sh
+rm -f "$SETUP"
 echo "==> setup claude + dtach"
-$DC exec --workspace-folder "$CFG" ${SECRETS_ARGS[@]+"${SECRETS_ARGS[@]}"} bash /workspaces/.claude-box-setup.sh
+docker exec -u node "$BOX" bash /tmp/claude-box-setup.sh
 
 echo "==> attach"
-attach "$(cid)"
+attach "$BOX"
