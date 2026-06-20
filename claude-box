@@ -3,35 +3,42 @@ set -euo pipefail
 
 # claude-box — one command: boot an isolated Docker box + attach interactive Claude.
 #
-#   claude-box <label> <owner/repo>   # create a box from a GitHub repo, then attach
-#   claude-box <label>                # reattach to a running box
+#   claude-box <owner/repo>   # create a box from a GitHub repo, then attach
+#   claude-box <id>           # reattach to a running box
 #
 # Pure Docker. The box environment is ~/.claude-box/Dockerfile (yours to edit).
 # The repo's default branch is cloned into a Docker VOLUME — never on the host fs.
-# Idempotent: box up -> attach. Box down -> create then attach.
 #
-# Multiple boxes run concurrently — volume + container are keyed by <label>.
+# Each box gets a random 5-char id; volume + container are keyed by it.
+# Multiple boxes run concurrently.
 #
 # Isolation:
-#   - repo code lives in a Docker VOLUME (claude-box-<label>), never on host fs
+#   - repo code lives in a Docker VOLUME (claude-box-<id>), never on host fs
 #   - your Claude subscription creds copied in; nothing else of host auth
 #   - GH_TOKEN (clone + push) read from ~/.claude-box/.env, injected via --env-file
 
-LABEL="${1:?usage: claude-box <label> [owner/repo]}"
-REPO="${2:-}"
+# random 5-char id (lowercase alnum); subshell disables pipefail so head's
+# early close doesn't trip the `tr` SIGPIPE under `set -o pipefail`.
+genid() { ( set +o pipefail; LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c5 ); }
+
+ARG="${1:?usage: claude-box <owner/repo> (create) | claude-box <id> (reattach)}"
+case "$ARG" in
+  */*) REPO="$ARG"; ID="$(genid)" ;;   # owner/repo -> create a new box
+  *)   REPO="";     ID="$ARG"     ;;   # bare id    -> reattach
+esac
 
 BOX_HOME="${CLAUDE_BOX_HOME:-$HOME/.claude-box}"
 DOCKERFILE="$BOX_HOME/Dockerfile"
 ENVFILE="$BOX_HOME/.env"                 # global env, KEY=value per line, chmod 600
 HOMEADD="$BOX_HOME/homeadditions"        # dotfiles/config copied into the box home
 IMG="claude-box"                         # built from ~/.claude-box/Dockerfile
-VOL="claude-box-$LABEL"                  # repo code lives here
+VOL="claude-box-$ID"                     # repo code lives here
 CRED="$HOME/.claude/.credentials.json"
 SOCK="/home/node/.claude-box.sock"       # dtach session socket (inside container)
 # command the dtach session runs (resolved at attach time inside the container)
 RUN='cd /workspaces/repo && exec "$(command -v claude || echo "$HOME/.local/bin/claude")" --dangerously-skip-permissions'
 
-cid() { docker ps -q --filter "label=claude-box=$LABEL" | head -1; }
+cid() { docker ps -q --filter "label=claude-box=$ID" | head -1; }
 # -A: attach if the session is live, else create it (self-heals after claude exits)
 # -E -z: no dtach keybinds (Ctrl-\ detach and Ctrl-Z suspend both pass through)
 attach() { exec docker exec -it -u node "$1" dtach -A "$SOCK" -E -z bash -lc "$RUN"; }
@@ -39,14 +46,14 @@ attach() { exec docker exec -it -u node "$1" dtach -A "$SOCK" -E -z bash -lc "$R
 # --- already running -> attach -------------------------------------------------
 EXIST="$(cid)"
 if [ -n "$EXIST" ]; then
-  echo "==> box '$LABEL' up, attaching"
+  echo "==> box '$ID' up, attaching"
   attach "$EXIST"
 fi
 
 # --- create path --------------------------------------------------------------
-[ -n "$REPO" ] || { echo "!! box '$LABEL' does not exist — pass <owner/repo> to create it"; exit 1; }
-case "$REPO" in */*) : ;; *) echo "!! repo must be GitHub owner/repo (got '$REPO')"; exit 1 ;; esac
+[ -n "$REPO" ] || { echo "!! box '$ID' does not exist — pass <owner/repo> to create a box"; exit 1; }
 [ -f "$CRED" ] || { echo "!! no Claude creds at $CRED — run 'claude' once on host"; exit 1; }
+echo "==> new box id: $ID  (reattach later with: claude-box $ID)"
 
 # --- seed ~/.claude-box defaults on first run ---------------------------------
 mkdir -p "$BOX_HOME" "$HOMEADD"

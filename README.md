@@ -3,7 +3,7 @@
 One command to boot an isolated Docker box and attach an interactive Claude session inside it.
 
 ```sh
-claude-box <label> <owner/repo>
+claude-box <owner/repo>
 ```
 
 The repo's default branch is cloned into a Docker volume — never touching your host filesystem. Only your Claude subscription credentials are copied in. The box environment is a single `Dockerfile` you control.
@@ -15,27 +15,27 @@ Running an agent with `--dangerously-skip-permissions` on your real files and cr
 ## Usage
 
 ```sh
-claude-box <label> <owner/repo>   # create a box from a GitHub repo, then attach
-claude-box <label>                # reattach to a running box
+claude-box <owner/repo>   # create a box from a GitHub repo, then attach
+claude-box <id>           # reattach to a running box
 ```
 
-- `label` — names the volume and container. Each label is an independent box; many run at once.
-- `owner/repo` — a GitHub repo. Required to create; omit it to reattach.
+- `owner/repo` — a GitHub repo (anything with a `/`). Creates a fresh box and prints its id.
+- `id` — the random 5-char id of an existing box (anything without a `/`). Reattaches to it.
 
-It's idempotent: if the box is up it attaches; otherwise it builds the image, clones the repo, runs the container, sets up Claude, then attaches.
+Each box gets a random id (e.g. `u87ec`) that keys its volume and container; many run at once. On create the id is printed so you can reattach later. It builds the image, clones the repo, runs the container, sets up Claude, then attaches.
 
-To detach, close the terminal — the session keeps running; re-run the same command to reattach. (Ctrl-\ and Ctrl-Z pass through to Claude rather than detaching.)
+To detach, close the terminal — the session keeps running; re-run `claude-box <id>` to reattach. (Ctrl-\ and Ctrl-Z pass through to Claude rather than detaching.)
 
 ```sh
-claude-box refactor you/project   # sandbox you/project under the label "refactor"
-claude-box refactor               # jump back into it later
+claude-box you/project   # sandbox you/project in a new box -> prints id, e.g. u87ec
+claude-box u87ec         # jump back into it later
 ```
 
 ## How it works
 
 1. **Image** — `~/.claude-box/Dockerfile` is built and tagged `claude-box`. Docker's layer cache makes rebuilds free when it hasn't changed.
-2. **Volume** — `claude-box-<label>` is created and the repo's default branch is cloned into it by a throwaway `alpine/git` container; the host fs is never touched.
-3. **Run** — the container starts from the `claude-box` image with the volume mounted at `/workspaces` and `~/.claude-box/.env` injected via `--env-file`. It's tagged `--label claude-box=<label>` so the box can be found again.
+2. **Volume** — `claude-box-<id>` is created and the repo's default branch is cloned into it by a throwaway `alpine/git` container; the host fs is never touched.
+3. **Run** — the container starts from the `claude-box` image with the volume mounted at `/workspaces` and `~/.claude-box/.env` injected via `--env-file`. It's tagged `--label claude-box=<id>` so the box can be found again.
 4. **Provision** — `homeadditions/` is copied into the box home, your Claude credentials are copied to `~/.claude`, then a setup script installs `dtach` + the `claude` CLI (if missing), pre-accepts the onboarding/trust/bypass-permissions prompts, and logs in `gh` with `GH_TOKEN`.
 5. **Attach** — `dtach -A` creates (or reattaches to) the session running `claude --dangerously-skip-permissions`.
 
