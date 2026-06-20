@@ -129,6 +129,10 @@ RUN echo 'node ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/node && chmod 0440 /etc/
 
 USER node
 WORKDIR /workspaces
+
+# claude installs to ~/.local/bin; keep it on PATH so the native installer
+# doesn't warn and `command -v claude` resolves.
+ENV PATH=/home/node/.local/bin:$PATH
 DOCKERFILE
   ok "seeded $DOCKERFILE"
 fi
