@@ -54,9 +54,6 @@ interactive_select() {
   local repos=() line
   [ -f "$hf" ] && while IFS= read -r line; do [ -n "$line" ] && repos+=("$line"); done < "$hf"
 
-  printf '\n%s  ┌─ claude-box ─────────────────────────┐%s\n' "$MAGENTA$BOLD" "$RESET"
-  printf '%s  └───────────────────────────────────────┘%s\n\n' "$MAGENTA$BOLD" "$RESET"
-
   if [ ${#repos[@]} -gt 0 ]; then
     printf '%s  Recent repos:%s\n' "$BOLD" "$RESET"
     local i=0 r
