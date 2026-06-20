@@ -47,6 +47,64 @@ box_header() {
 # early close doesn't trip the `tr` SIGPIPE under `set -o pipefail`.
 genid() { ( set +o pipefail; LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c5 ); }
 
+# interactive_select — prompts for repo (with numbered history) then prompt.
+# Sets globals ARG, REPO, ID, PROMPT. Returns 1 on user cancel.
+interactive_select() {
+  local hf="${CLAUDE_BOX_HOME:-$HOME/.claude-box}/.history"
+  local repos=() line
+  [ -f "$hf" ] && while IFS= read -r line; do [ -n "$line" ] && repos+=("$line"); done < "$hf"
+
+  printf '\n%s  ┌─ claude-box ─────────────────────────┐%s\n' "$MAGENTA$BOLD" "$RESET"
+  printf '%s  └───────────────────────────────────────┘%s\n\n' "$MAGENTA$BOLD" "$RESET"
+
+  if [ ${#repos[@]} -gt 0 ]; then
+    printf '%s  Recent repos:%s\n' "$BOLD" "$RESET"
+    local i=0 r
+    for r in "${repos[@]}"; do
+      [ "$i" -ge 10 ] && break
+      printf '    %s%d)%s  %s\n' "$CYAN" "$((i+1))" "$RESET" "$r"
+      i=$(( i + 1 ))
+    done
+    printf '\n'
+  fi
+
+  local hint='owner/repo'
+  [ ${#repos[@]} -gt 0 ] && hint="owner/repo or 1-${#repos[@]}"
+  printf '  %sRepo%s (%s, empty to cancel): ' "$BOLD" "$RESET" "$hint"
+  local repo_in
+  IFS= read -r repo_in </dev/tty || { printf '\n'; return 1; }
+  [ -z "$repo_in" ] && return 1
+
+  if [[ "$repo_in" =~ ^[0-9]+$ ]]; then
+    local idx=$(( repo_in - 1 ))
+    if [ "$idx" -lt 0 ] || [ "$idx" -ge "${#repos[@]}" ]; then
+      die "no entry $repo_in"
+    fi
+    repo_in="${repos[$idx]}"
+    printf '  %s→%s  %s\n' "$DIM" "$RESET" "$repo_in"
+  fi
+
+  [[ "$repo_in" == */* ]] || die "expected owner/repo format, got: $repo_in"
+
+  printf '\n  %sInitial prompt%s (optional, empty to skip): ' "$BOLD" "$RESET"
+  local prompt_in=''
+  IFS= read -r prompt_in </dev/tty || { printf '\n'; return 1; }
+
+  # update history: deduplicate and prepend most-recently-used entry
+  local new_repos=("$repo_in")
+  for r in "${repos[@]}"; do
+    [ "$r" = "$repo_in" ] || new_repos+=("$r")
+  done
+  local hdir="${CLAUDE_BOX_HOME:-$HOME/.claude-box}"
+  mkdir -p "$hdir"
+  printf '%s\n' "${new_repos[@]:0:20}" > "$hf"
+
+  ARG="$repo_in"
+  REPO="$repo_in"
+  ID="$(genid)"
+  PROMPT="$prompt_in"
+}
+
 # parse args: a single positional (owner/repo | id), plus an optional -p/--prompt.
 PROMPT=""; POS=()
 while [ $# -gt 0 ]; do
@@ -60,11 +118,16 @@ done
 # no -p but stdin is piped (not a tty) -> read the prompt from stdin
 [ -z "$PROMPT" ] && [ ! -t 0 ] && PROMPT="$(cat)"
 
-ARG="${POS[0]:?usage: claude-box <owner/repo> [-p PROMPT] (create) | claude-box <id> (reattach)}"
-case "$ARG" in
-  */*) REPO="$ARG"; ID="$(genid)" ;;   # owner/repo -> create a new box
-  *)   REPO="";     ID="$ARG"     ;;   # bare id    -> reattach
-esac
+if [ "${#POS[@]}" -eq 0 ]; then
+  [ -t 1 ] || die "usage: claude-box <owner/repo> [-p PROMPT] (create) | claude-box <id> (reattach)"
+  interactive_select || exit 0
+else
+  ARG="${POS[0]}"
+  case "$ARG" in
+    */*) REPO="$ARG"; ID="$(genid)" ;;   # owner/repo -> create a new box
+    *)   REPO="";     ID="$ARG"     ;;   # bare id    -> reattach
+  esac
+fi
 
 BOX_HOME="${CLAUDE_BOX_HOME:-$HOME/.claude-box}"
 DOCKERFILE="$BOX_HOME/Dockerfile"
