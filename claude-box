@@ -79,7 +79,7 @@ SOCK="/home/node/.claude-box.sock"       # dtach session socket (inside containe
 # If this box already has a recorded session, resume it (claude --continue);
 # else if an initial prompt was seeded (-p / stdin), boot Claude with it;
 # otherwise start fresh. The session dir is bind-mounted from the host (see below).
-RUN='cd /workspaces/repo && CLAUDE="$(command -v claude || echo "$HOME/.local/bin/claude")"; PF="$HOME/.claude-box-prompt"; if ls "$HOME"/.claude/projects/*/*.jsonl >/dev/null 2>&1; then exec "$CLAUDE" --dangerously-skip-permissions --continue; elif [ -s "$PF" ]; then exec "$CLAUDE" --dangerously-skip-permissions "$(cat "$PF")"; else exec "$CLAUDE" --dangerously-skip-permissions; fi'
+RUN='cd /workspaces/repo && CLAUDE="$(command -v claude || echo "$HOME/.local/bin/claude")"; PF="$HOME/.claude-box-prompt"; SYS="$HOME/.claude-box-system-prompt"; run_claude() { if [ -s "$SYS" ]; then exec "$CLAUDE" --dangerously-skip-permissions --append-system-prompt "$(cat "$SYS")" "$@"; else exec "$CLAUDE" --dangerously-skip-permissions "$@"; fi; }; if ls "$HOME"/.claude/projects/*/*.jsonl >/dev/null 2>&1; then run_claude --continue; elif [ -s "$PF" ]; then run_claude "$(cat "$PF")"; else run_claude; fi'
 
 cid() { docker ps -q --filter "label=claude-box=$ID" | head -1; }
 # -A: attach if the session is live, else create it (self-heals after claude exits)
@@ -207,6 +207,11 @@ docker cp "$SETUP" "$BOX":/tmp/claude-box-setup.sh
 rm -f "$SETUP"
 step "installing claude & dtach"
 docker exec -u node "$BOX" bash /tmp/claude-box-setup.sh
+
+# --- inject sandbox system prompt (read by $RUN on every boot) ----------------
+printf 'You are running inside claude-box — an isolated Docker sandbox.\nBox: claude-box-%s  |  Branch: claude-box-%s\n\nAfter making changes to the codebase, commit them with a clear git commit message and push the branch:\n  git add -A && git commit -m "..." && git push origin claude-box-%s\nThis ensures your work is preserved and can be reviewed as a pull request once the session ends.\n' \
+  "$ID" "$ID" "$ID" \
+  | docker exec -i -u node "$BOX" sh -c 'cat > "$HOME/.claude-box-system-prompt"'
 
 # --- seed the initial prompt (read by $RUN on first boot) ---------------------
 if [ -n "$PROMPT" ]; then
